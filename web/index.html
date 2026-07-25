@@ -350,10 +350,9 @@
     <div class="card-title">运行模式</div>
     <div class="card-body">
       <div class="toggle-wrap">
-        <div class="toggle on" id="qqbotToggle" onclick="toggleQQBot()"></div>
-        <span id="qqbotLabel" style="font-size:13px;">QQ Bot 已启用</span>
+        <span style="font-size:13px;color:var(--green);">napcat HTTP 模式</span>
       </div>
-      <p style="font-size:12px;color:var(--muted);margin-top:8px;" id="qqbotHint">完整模式：QQ 推送 + MAA 监控 + HTTP 服务</p>
+      <p style="font-size:12px;color:var(--muted);margin-top:8px;">QQ 推送 + MAA 监控 + HTTP 服务</p>
     </div>
   </div>
 
@@ -611,7 +610,6 @@ document.addEventListener('keydown', e => {
 // ──────────────────────────────────────
 //  State
 // ──────────────────────────────────────
-let qqbotEnabled = true;
 let logAutoScroll = true;
 let eventSource = null;
 let appInited = false;
@@ -705,7 +703,7 @@ function toast(msg, type) {
 //  Service control
 // ──────────────────────────────────────
 async function startService() {
-  const r = await apiPost('/api/service/start', {qqbot: qqbotEnabled});
+  const r = await apiPost('/api/service/start', {});
   if (r.ok) { toast('Service started', 'success'); refreshButtons(r.running); }
   else toast(r.error || 'Failed', 'error');
 }
@@ -715,7 +713,7 @@ async function stopService() {
   else toast(r.error || 'Failed', 'error');
 }
 async function restartService() {
-  const r = await apiPost('/api/service/restart', {qqbot: qqbotEnabled});
+  const r = await apiPost('/api/service/restart', {});
   if (r.ok) { toast('Service restarted', 'success'); refreshButtons(r.running); }
   else toast(r.error || 'Failed', 'error');
 }
@@ -727,25 +725,6 @@ function refreshButtons(running) {
   const text = document.getElementById('statusText');
   if (running) { badge.className = 'badge badge-running'; text.textContent = 'Running'; }
   else { badge.className = 'badge badge-stopped'; text.textContent = 'Stopped'; }
-}
-
-// ──────────────────────────────────────
-//  QQ Bot toggle
-// ──────────────────────────────────────
-function toggleQQBot() {
-  qqbotEnabled = !qqbotEnabled;
-  const el = document.getElementById('qqbotToggle');
-  const label = document.getElementById('qqbotLabel');
-  const hint = document.getElementById('qqbotHint');
-  if (qqbotEnabled) {
-    el.classList.add('on');
-    label.textContent = 'QQ Bot Enabled';
-    hint.textContent = 'Full mode: QQ push + MAA monitor + HTTP server';
-  } else {
-    el.classList.remove('on');
-    label.textContent = 'QQ Bot Disabled';
-    hint.textContent = 'Standalone: MAA monitor + HTTP only';
-  }
 }
 
 // ──────────────────────────────────────
@@ -807,12 +786,6 @@ async function loadConfig() {
   document.getElementById('cfgPort').value = r.http_port || 2345;
   document.getElementById('cfgBatchSize').value = r.log_batch_size || 5;
   document.getElementById('cfgBatchTimeout').value = r.log_batch_timeout || 10;
-  if (r.qqbot_enabled === false) {
-    qqbotEnabled = false;
-    document.getElementById('qqbotToggle').classList.remove('on');
-    document.getElementById('qqbotLabel').textContent = 'QQ Bot Disabled';
-    document.getElementById('qqbotHint').textContent = 'Standalone: MAA monitor + HTTP only';
-  }
 }
 async function saveConfig() {
   const data = {
@@ -824,7 +797,6 @@ async function saveConfig() {
     http_port: parseInt(document.getElementById('cfgPort').value) || 2345,
     log_batch_size: parseInt(document.getElementById('cfgBatchSize').value) || 5,
     log_batch_timeout: parseInt(document.getElementById('cfgBatchTimeout').value) || 10,
-    qqbot_enabled: qqbotEnabled,
   };
   const r = await apiPost('/api/config', data);
   if (r.ok) toast('Config saved, restart to apply', 'success');

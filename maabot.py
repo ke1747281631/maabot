@@ -1,20 +1,21 @@
 """
-MAA 运行情况通知 - 基于 NcatBot 后台模式 + MAA Remote Control Schema
+MAA 运行情况通知 - 基于 napcat HTTP API + MAA Remote Control Schema
 本程序由 AI（GitHub Copilot）生成，经人工测试调整。
 ────────────────────────────────────────────────────────────────────
 依赖安装：
-  pip install ncatbot flask waitress
+  pip install flask waitress pyyaml
 
 使用方式：
   1. 修改下方 CONFIG（bot_qq、admin_qq、log_path 必填）
-  2. 运行：python maa_ncatbot_notifier.py
+  2. 运行：python maabot.py
   3. MAA 远程控制填入：
        任务获取端点: http://127.0.0.1:2345/maa/getTask
        任务汇报端点: http://127.0.0.1:2345/maa/reportStatus
+  4. napcat 桌面版配置 OneBot11 HTTP Server (端口 3000) + HTTP Client Webhook
+     (上报地址 http://127.0.0.1:2345/napcat/event)
 """
 
 import uuid
-import asyncio
 import threading
 import re
 import sys
@@ -29,6 +30,49 @@ import logging
 import secrets
 from datetime import datetime
 from collections import defaultdict
+
+# ──────────────────────────────────────────────
+#  依赖自检：缺失第三方包时给出友好提示并退出
+# ──────────────────────────────────────────────
+def _check_dependencies():
+    """启动前检查第三方依赖，缺失则打印安装提示并退出（exit 1）。"""
+    _required = {
+        "flask": "flask",
+        "waitress": "waitress",
+        "yaml": "pyyaml",
+    }
+    _missing = []
+    for _mod, _pkg in _required.items():
+        try:
+            __import__(_mod)
+        except ImportError:
+            _missing.append(_pkg)
+    if _missing:
+        _cmd = f"{sys.executable} -m pip install {' '.join(_missing)}"
+        print("=" * 60)
+        print("[错误] 缺少以下 Python 依赖:")
+        for _p in _missing:
+            print(f"       - {_p}")
+        print()
+        print("       请运行以下命令安装（注意确认是正确的 Python）:")
+        print(f"       {_cmd}")
+        print()
+        print("       或运行同目录下的「运行环境安装.bat」")
+        print("=" * 60)
+        sys.exit(1)
+
+_check_dependencies()
+# ──────────────────────────────────────────────
+
+# 修复 Windows GBK 终端无法输出 emoji 等 Unicode 字符的问题
+# （中文 Windows 默认 stdout 编码为 GBK/936，遇到 ✅🛑❓ 等 emoji 会抛 UnicodeEncodeError）
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from flask import Flask, request, jsonify, session, redirect, url_for
 from waitress import serve
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -52,22 +96,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════
-#  命令行参数解析（GUI 控制面板传入 --no-qqbot 时独立运行）
+#  命令行参数解析
 # ═══════════════════════════════════════════════
 _parser = argparse.ArgumentParser(description="MAABot 服务")
-_parser.add_argument("--no-qqbot", action="store_true",
-                     help="禁用 QQ Bot（独立模式：仅 MAA 监控 + HTTP 服务）")
 _args, _ = _parser.parse_known_args()
-QQBOT_ENABLED = not _args.no_qqbot
-
-if QQBOT_ENABLED:
-    from ncatbot.core import BotClient
-    from ncatbot.core.event import PrivateMessageEvent
-else:
-    # 独立模式：不导入 ncatbot，定义空桩避免后续引用报错
-    BotClient = None
-    PrivateMessageEvent = None
-    print("[INFO] 独立模式：QQ Bot 已禁用，仅运行 MAA 监控 + HTTP 服务")
 
 # ═══════════════════════════════════════════════
 #  从 config.yaml 读取 QQ 号
@@ -106,6 +138,10 @@ CONFIG = {
     "log_batch_size": int(_yaml_cfg.get("log_batch_size", 5)),
     # 日志推送：最多等待多少秒后强制发送（即使不足 batch_size 条）
     "log_batch_timeout": int(_yaml_cfg.get("log_batch_timeout", 10)),
+
+    # napcat HTTP API（通过 HTTP 与 napcat 桌面版通讯）
+    "napcat_http_api_url":   _yaml_cfg.get("napcat_http_api_url", ""),    # 如 http://localhost:3000
+    "napcat_http_api_token": _yaml_cfg.get("napcat_http_api_token", ""),  # napcat HTTP Server token
 }
 
 # ═══════════════════════════════════════════════
@@ -665,9 +701,6 @@ HELP_TEXT = (
 # ═══════════════════════════════════════════════
 #  全局状态
 # ═══════════════════════════════════════════════
-api = None
-bot = BotClient() if QQBOT_ENABLED else None
-bot_loop: asyncio.AbstractEventLoop = None
 
 pending_tasks: list = []
 pending_tasks_lock = threading.Lock()
@@ -681,24 +714,79 @@ log_buffer_timer = None
 
 
 # ═══════════════════════════════════════════════
-#  发私聊消息（线程安全，投递到 ncatbot 事件循环）
+#  NapCat HTTP API 客户端（通过 OneBot11 HTTP 协议与 napcat 桌面版通讯）
+# ═══════════════════════════════════════════════
+class NapCatHTTPAPI:
+    """通过 napcat 的 OneBot11 HTTP API 发送消息。"""
+
+    def __init__(self, base_url: str, token: str = ""):
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+
+    def _request(self, method: str, path: str, data: dict = None) -> dict:
+        import urllib.request
+        import urllib.error
+        url = f"{self.base_url}{path}"
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        body = json.dumps(data).encode("utf-8") if data else None
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[ERROR] napcat HTTP API 请求失败 ({path}): {e}")
+            return {}
+
+    def send_private_msg(self, user_id: int, message: str) -> bool:
+        result = self._request("POST", "/send_private_msg", {
+            "user_id": user_id,
+            "message": [{"type": "text", "data": {"text": message}}],
+        })
+        return result.get("status") == "ok"
+
+    def send_group_msg(self, group_id: int, message: str) -> bool:
+        result = self._request("POST", "/send_group_msg", {
+            "group_id": group_id,
+            "message": [{"type": "text", "data": {"text": message}}],
+        })
+        return result.get("status") == "ok"
+
+    def get_login_info(self) -> dict:
+        return self._request("GET", "/get_login_info").get("data", {})
+
+
+# napcat HTTP API 单例（惰性初始化）
+_napcat_http_api: NapCatHTTPAPI | None = None
+
+
+def _get_napcat_http_api() -> NapCatHTTPAPI | None:
+    """返回配置好的 NapCatHTTPAPI 实例，未配置则返回 None。"""
+    global _napcat_http_api
+    if _napcat_http_api is None and CONFIG.get("napcat_http_api_url"):
+        _napcat_http_api = NapCatHTTPAPI(
+            CONFIG["napcat_http_api_url"],
+            CONFIG.get("napcat_http_api_token", ""),
+        )
+    return _napcat_http_api
+
+
+# ═══════════════════════════════════════════════
+#  发私聊消息（通过 napcat HTTP API）
 # ═══════════════════════════════════════════════
 def send_private_msg(text: str):
-    if not QQBOT_ENABLED:
-        print(f"[NOTIFY] {text[:80]}")
-        return
-    if api is None or bot_loop is None:
-        print(f"[WARN] Bot 未就绪: {text[:50]}")
+    http_api = _get_napcat_http_api()
+    if http_api:
+        ok = http_api.send_private_msg(int(CONFIG["admin_qq"]), text)
+        if ok:
+            print(f"[INFO] 已通知(HTTP): {text[:60]}")
+        else:
+            print(f"[ERROR] HTTP 通知失败: {text[:60]}")
         return
 
-    async def _do():
-        try:
-            await api.post_private_msg(CONFIG["admin_qq"], text=text)
-            print(f"[INFO] 已通知: {text[:60]}")
-        except Exception as e:
-            print(f"[ERROR] 发送失败: {e}")
-
-    asyncio.run_coroutine_threadsafe(_do(), bot_loop)
+    # napcat HTTP API 未配置，仅打印
+    print(f"[NOTIFY] {text[:80]}")
 
 
 # ═══════════════════════════════════════════════
@@ -1428,8 +1516,8 @@ def api_status():
         "maa_running": maa_running,
         "device_count": len(devices),
         "pending_count": len(pending_tasks),
-        "qqbot_enabled": QQBOT_ENABLED,
-        "mode": "qqbot" if QQBOT_ENABLED else "standalone",
+        "napcat_http": True,
+        "mode": "napcat-http",
     })
 
 
@@ -1514,8 +1602,6 @@ def api_maa_restart():
 @app.route("/api/service/start", methods=["POST"])
 def api_service_start():
     """启动服务（启动 MAA 进程）"""
-    data = request.get_json(silent=True) or {}
-    qqbot = data.get("qqbot", True)
     def _do():
         ok = restart_maa()
         if ok:
@@ -1611,105 +1697,102 @@ builtins.print = _patched_print
 
 
 # ═══════════════════════════════════════════════
-#  NcatBot：监听管理员私聊指令（仅在 QQ Bot 模式下注册）
+#  私聊消息处理（napcat HTTP Webhook 调用）
 # ═══════════════════════════════════════════════
-if QQBOT_ENABLED:
-    @bot.on_private_message()
-    async def on_private_message(event: PrivateMessageEvent):
-        global bot_loop
-        if bot_loop is None:
-            bot_loop = asyncio.get_event_loop()
-            print(f"[INFO] 已捕获 ncatbot 事件循环")
+def _handle_private_message(user_id, text: str):
+    """处理管理员私聊消息，通过 napcat HTTP API 回复。"""
+    if str(user_id) != str(CONFIG["admin_qq"]):
+        return
 
-        if event.user_id != CONFIG["admin_qq"]:
-            return
+    text = text.strip()
+    print(f"[QQ] 收到管理员消息: {text}")
 
-        text = event.raw_message.strip()
-        print(f"[QQ] 收到管理员消息: {text}")
+    if text in ("帮助", "help"):
+        send_private_msg(HELP_TEXT)
+        return
 
-        if text in ("帮助", "help"):
-            await api.post_private_msg(CONFIG["admin_qq"], text=HELP_TEXT)
-            return
+    for keyword, cmd_def in QQ_COMMANDS.items():
+        if keyword in text:
+            tasks = cmd_def["tasks"]
 
-        for keyword, cmd_def in QQ_COMMANDS.items():
-            if keyword in text:
-                tasks = cmd_def["tasks"]
+            if tasks is not None:
+                # 在线程中执行重启和任务下发，避免阻塞
+                task_desc = "、".join(TASK_TYPE_NAMES.get(t, t) for t in tasks)
 
-                if tasks is not None:
-                    # 在线程中执行重启和任务下发，避免阻塞事件循环
-                    task_desc = "、".join(TASK_TYPE_NAMES.get(t, t) for t in tasks)
+                def _do_restart_and_dispatch(kw=keyword, ts=tasks, desc=task_desc):
+                    ok = apply_tasks_and_restart(ts)
+                    if ok:
+                        _set_mode(kw)  # 持久化状态
+                        dispatch_task("LinkStart")
+                        send_private_msg(
+                            f"✅ 指令已下发\n"
+                            f"┌ 模式：{kw}\n"
+                            f"└ 任务：{desc}"
+                        )
 
-                    def _do_restart_and_dispatch(kw=keyword, ts=tasks, desc=task_desc):
-                        ok = apply_tasks_and_restart(ts)
-                        if ok:
-                            _set_mode(kw)  # 持久化状态
-                            dispatch_task("LinkStart")
-                            send_private_msg(
-                                f"✅ 指令已下发\n"
-                                f"┌ 模式：{kw}\n"
-                                f"└ 任务：{desc}"
-                            )
+                threading.Thread(target=_do_restart_and_dispatch, daemon=True).start()
+                send_private_msg(f"📨 收到指令「{keyword}」，正在配置任务...")
+            else:
+                # 控制命令（停止/心跳）
+                if "StopTask" in cmd_def["cmds"]:
+                    # StopTask 需要反复发送：MAA 内部顺序队列中的 LinkStart
+                    # 可能在首次 Stop 后才开始执行，需要多次覆盖
+                    def _do_stop():
+                        for i in range(5):
+                            dispatch_task("StopTask")
+                            if i < 4:
+                                time.sleep(2)
+                        send_private_msg("🛑 停止指令已连续发送完毕")
 
-                    threading.Thread(target=_do_restart_and_dispatch, daemon=True).start()
-                    await api.post_private_msg(
-                        CONFIG["admin_qq"],
-                        text=f"📨 收到指令「{keyword}」，正在配置任务..."
-                    )
+                    threading.Thread(target=_do_stop, daemon=True).start()
+                    send_private_msg("🛑 正在停止 MAA 任务（持续发送中）...")
                 else:
-                    # 控制命令（停止/心跳）
-                    if "StopTask" in cmd_def["cmds"]:
-                        # StopTask 需要反复发送：MAA 内部顺序队列中的 LinkStart
-                        # 可能在首次 Stop 后才开始执行，需要多次覆盖
-                        def _do_stop():
-                            for i in range(5):
-                                dispatch_task("StopTask")
-                                if i < 4:
-                                    time.sleep(2)
-                            send_private_msg("🛑 停止指令已连续发送完毕")
+                    for cmd in cmd_def["cmds"]:
+                        dispatch_task(cmd)
+                    task_desc = "、".join(TASK_NAMES.get(c, c) for c in cmd_def["cmds"])
+                    send_private_msg(f"✅ 已发送：{task_desc}")
+            return
 
-                        threading.Thread(target=_do_stop, daemon=True).start()
-                        await api.post_private_msg(
-                            CONFIG["admin_qq"],
-                            text="🛑 正在停止 MAA 任务（持续发送中）..."
-                        )
-                    else:
-                        for cmd in cmd_def["cmds"]:
-                            dispatch_task(cmd)
-                        task_desc = "、".join(TASK_NAMES.get(c, c) for c in cmd_def["cmds"])
-                        await api.post_private_msg(
-                            CONFIG["admin_qq"],
-                            text=f"✅ 已发送：{task_desc}"
-                        )
-                return
+    send_private_msg("❓ 未识别指令，发「帮助」查看可用命令")
 
-        await api.post_private_msg(CONFIG["admin_qq"], text="❓ 未识别指令，发「帮助」查看可用命令")
+
+# ═══════════════════════════════════════════════
+#  napcat HTTP Webhook 端点（接收 napcat 桌面版的 OneBot11 事件上报）
+# ═══════════════════════════════════════════════
+@app.route("/napcat/event", methods=["POST"])
+def napcat_event():
+    """接收 napcat 的 OneBot11 HTTP Webhook 事件上报。"""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"status": "error", "message": "invalid json"}), 400
+
+    post_type = data.get("post_type")
+    if post_type == "message":
+        message_type = data.get("message_type")
+        if message_type == "private":
+            user_id = data.get("user_id")
+            raw_message = data.get("raw_message", "")
+            # 在线程中处理，避免阻塞 Flask 请求
+            threading.Thread(
+                target=_handle_private_message,
+                args=(user_id, raw_message),
+                daemon=True,
+            ).start()
+
+    return jsonify({"status": "ok"})
 
 
 # ═══════════════════════════════════════════════
 #  启动入口
 # ═══════════════════════════════════════════════
 if __name__ == "__main__":
-    if QQBOT_ENABLED:
-        api = bot.run_backend()
-
-        # 尝试获取 ncatbot 事件循环
-        try:
-            bot_loop = asyncio.get_event_loop()
-            if not bot_loop.is_running():
-                bot_loop = None
-        except Exception:
-            bot_loop = None
-    else:
-        api = None
-        bot_loop = None
-
     print("=" * 50)
-    mode_str = "QQ Bot + MAA 监控" if QQBOT_ENABLED else "独立模式（仅 MAA 监控）"
-    print(f"[INFO] 运行模式: {mode_str}")
+    print(f"[INFO] 运行模式: napcat HTTP 模式")
     print(f"[INFO] 机器人 QQ: {CONFIG['bot_qq']}")
     print(f"[INFO] 管理员 QQ: {CONFIG['admin_qq']}")
     print(f"[INFO] 监控日志: {CONFIG['log_path']}")
     print(f"[INFO] MAA 端点: http://{CONFIG['host']}:{CONFIG['port']}/maa/getTask")
+    print(f"[INFO] napcat API: {CONFIG.get('napcat_http_api_url', '(未配置)')}")
     print("=" * 50)
 
     # 检测 MAA 状态（不再自动启动/修改配置，由 GUI 或用户手动控制）
@@ -1730,11 +1813,7 @@ if __name__ == "__main__":
     # 启动日志监控线程
     threading.Thread(target=watch_log_file, daemon=True).start()
 
-    if QQBOT_ENABLED:
-        send_private_msg("✅ MAA 通知服务已启动，发送「帮助」查看可用指令")
+    send_private_msg("✅ MAA 通知服务已启动，发送「帮助」查看可用指令")
 
     print(f"[INFO] HTTP 服务启动于 http://{CONFIG['host']}:{CONFIG['port']}")
     serve(app, host=CONFIG["host"], port=CONFIG["port"], threads=4)
-
-    if QQBOT_ENABLED:
-        bot.exit()

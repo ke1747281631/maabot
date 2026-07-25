@@ -62,22 +62,6 @@ def load_yaml_config() -> dict:
         "enable_webui_interaction": True,
         "debug": False,
         "github_proxy": None,
-        "check_ncatbot_update": True,
-        "skip_ncatbot_install_check": False,
-        "websocket_timeout": 15,
-        "napcat": {
-            "ws_uri": "ws://localhost:3001",
-            "ws_token": "NcatBot",
-            "ws_listen_ip": "localhost",
-            "webui_uri": "http://localhost:8765",
-            "webui_token": "",
-            "enable_webui": True,
-            "check_napcat_update": False,
-            "stop_napcat": False,
-            "remote_mode": False,
-            "report_self_message": False,
-            "report_forward_message_detail": True,
-        },
         "plugin": {
             "plugins_dir": "plugins",
             "plugin_whitelist": [],
@@ -91,7 +75,8 @@ def load_yaml_config() -> dict:
         "http_port":        2345,
         "log_batch_size":   5,
         "log_batch_timeout": 10,
-        "qqbot_enabled":    True,
+        "napcat_http_api_url":   "http://localhost:3000",
+        "napcat_http_api_token": "",
     }
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -209,35 +194,20 @@ class MaaBotGUI(tk.Tk):
         self._btn_stop.pack(side=tk.LEFT, padx=(0, 8))
         self._btn_restart.pack(side=tk.LEFT)
 
-        # 模式切换
+        # 运行模式（napcat HTTP）
         mode_card = self._card(f, "运行模式")
         mode_card.pack(fill=tk.X, padx=16, pady=6)
 
         mode_inner = tk.Frame(mode_card, bg=CLR_SURFACE)
         mode_inner.pack(fill=tk.X, padx=10, pady=10)
 
-        self._qqbot_var = tk.BooleanVar(value=self._cfg.get("qqbot_enabled", True))
-        cb_qq = tk.Checkbutton(
-            mode_inner,
-            text="启用 QQ Bot（NcatBot 推送）",
-            variable=self._qqbot_var,
-            bg=CLR_SURFACE, fg=CLR_TEXT,
-            selectcolor=CLR_BG,
-            activebackground=CLR_SURFACE,
-            activeforeground=CLR_TEXT,
-            font=("微软雅黑", 10),
-            command=self._on_mode_change,
-        )
-        cb_qq.pack(side=tk.LEFT)
-
         self._mode_hint = tk.Label(
             mode_inner,
-            text="",
-            bg=CLR_SURFACE, fg=CLR_MUTED,
+            text="napcat HTTP 模式：QQ 推送 + MAA 监控 + HTTP 服务",
+            bg=CLR_SURFACE, fg=CLR_GREEN,
             font=("微软雅黑", 9),
         )
-        self._mode_hint.pack(side=tk.LEFT, padx=12)
-        self._on_mode_change()  # 初始化 hint
+        self._mode_hint.pack(side=tk.LEFT)
 
         # MAA 状态区
         maa_card = self._card(f, "MAA 状态")
@@ -568,10 +538,22 @@ class MaaBotGUI(tk.Tk):
             self._log(f"[GUI] ⚠️ 端口 {port} 仍被占用，强制释放...\n", "warn")
             self._force_free_port(port)
 
+        # 检测 napcat HTTP API 是否就绪（端口 3000 由 QQ.exe 监听）
+        if not self._is_port_listening(3000):
+            ret = messagebox.askyesno(
+                "napcat 未就绪",
+                "检测到 napcat HTTP API（端口 3000）未启动！\n\n"
+                "QQ 推送需要 napcat 桌面版先运行并登录。\n"
+                "请先启动 NapCatQQ-Desktop，登录机器人 QQ 号。\n\n"
+                "是否仍要启动（无 QQ 推送，仅 MAA 监控 + HTTP 服务）？\n"
+                "（点击「否」取消启动）",
+            )
+            if not ret:
+                self._log("[GUI] 用户取消启动（napcat 未就绪）\n", "warn")
+                return
+
         # 生成启动参数
         args = [sys.executable, MAABOT_SCRIPT]
-        if not self._qqbot_var.get():
-            args.append("--no-qqbot")
 
         self._log(f"[GUI] 正在启动服务: {' '.join(args)}\n", "muted")
 
@@ -764,6 +746,16 @@ class MaaBotGUI(tk.Tk):
             self._log(f"[GUI] 已终止残留进程 PID={pid}\n", "warn")
         except Exception as e:
             self._log(f"[GUI] 终止进程 PID={pid} 失败: {e}\n", "error")
+
+    def _is_port_listening(self, port: int) -> bool:
+        """检测指定端口是否在监听（TCP 连接测试）"""
+        import socket as _socket
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                return s.connect_ex(("127.0.0.1", port)) == 0
+        except Exception:
+            return False
 
     def _wait_port_free(self, port: int, timeout: int = 5) -> bool:
         """等待指定端口释放，返回 True 表示端口已空闲"""
@@ -1133,7 +1125,6 @@ class MaaBotGUI(tk.Tk):
         self._cfg["maa_exe"]          = self._ef_maa_exe.get().strip()
         self._cfg["maa_log_path"]     = self._ef_log_path.get().strip()
         self._cfg["maa_config_path"]  = self._ef_cfg_path.get().strip()
-        self._cfg["qqbot_enabled"]    = self._qqbot_var.get()
         self._cfg["frp_server_addr"]  = self._ef_frp_server.get().strip()
         self._cfg["webui_domain"]     = self._ef_domain.get().strip()
         try:
@@ -1150,21 +1141,6 @@ class MaaBotGUI(tk.Tk):
         # 更新 WebUI 地址标签
         self._refresh_webui_labels()
         messagebox.showinfo("保存成功", "配置已保存！\n重启服务后生效。")
-
-    # ─────────────────────────────────────────────
-    #  模式切换
-    # ─────────────────────────────────────────────
-    def _on_mode_change(self):
-        if self._qqbot_var.get():
-            self._mode_hint.config(
-                text="完整模式：QQ 推送 + MAA 监控 + HTTP 服务",
-                fg=CLR_GREEN,
-            )
-        else:
-            self._mode_hint.config(
-                text="独立模式：仅 MAA 监控 + HTTP 服务（无 QQ 推送）",
-                fg=CLR_YELLOW,
-            )
 
     # ─────────────────────────────────────────────
     #  日志系统
