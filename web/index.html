@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAABot 控制面板</title>
+<style>
+  :root {
+    --bg: #0f0f1a;
+    --surface: #1a1a2e;
+    --surface2: #22223a;
+    --border: #2e2e4a;
+    --accent: #7c6af7;
+    --accent-dim: #5a4cc7;
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --yellow: #f9e2af;
+    --blue: #89b4fa;
+    --text: #cdd6f4;
+    --muted: #6c7086;
+    --log-bg: #0a0a14;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Segoe UI', '微软雅黑', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* Header */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .header h1 { font-size: 18px; font-weight: 700; }
+  .header h1 span { color: var(--accent); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 14px; border-radius: 20px;
+    font-size: 13px; font-weight: 600;
+  }
+  .badge-running  { background: rgba(166,227,161,.12); color: var(--green); }
+  .badge-stopped  { background: rgba(243,139,168,.12); color: var(--red); }
+  .badge-dot { width:8px; height:8px; border-radius:50%; }
+  .badge-running .badge-dot { background: var(--green); animation: pulse 2s infinite; }
+  .badge-stopped .badge-dot { background: var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* Nav */
+  .nav {
+    display: flex; gap: 0;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+  }
+  .nav-item {
+    padding: 12px 22px;
+    font-size: 14px; font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all .2s;
+    user-select: none;
+  }
+  .nav-item:hover { color: var(--text); }
+  .nav-item.active { color: #fff; border-bottom-color: var(--accent); }
+
+  /* Content */
+  .page { display: none; padding: 24px 28px; max-width: 1100px; margin: 0 auto; }
+  .page.active { display: block; }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 18px;
+    overflow: hidden;
+  }
+  .card-title {
+    padding: 12px 18px;
+    font-size: 13px; font-weight: 700;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card-body { padding: 16px 18px; }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 18px;
+    border: none; border-radius: 8px;
+    font-size: 13px; font-weight: 600;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .btn:active { transform: scale(.96); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-green  { background: var(--green);  color: #1e1e2e; }
+  .btn-red    { background: var(--red);    color: #1e1e2e; }
+  .btn-yellow { background: var(--yellow); color: #1e1e2e; }
+  .btn-accent { background: var(--accent); color: #fff; }
+  .btn-muted  { background: var(--surface2); color: var(--text); border:1px solid var(--border); }
+  .btn-sm { padding: 5px 12px; font-size: 12px; border-radius: 6px; }
+
+  /* Task grid */
+  .task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 10px; }
+  .task-btn {
+    padding: 12px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 13px; font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .task-btn:hover { border-color: var(--accent); background: rgba(124,106,247,.1); }
+  .task-btn:active { transform: scale(.96); }
+
+  /* Checkbox grid */
+  .check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); gap: 8px; }
+  .check-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--surface2);
+    cursor: pointer;
+    transition: all .15s;
+    user-select: none;
+  }
+  .check-item:hover { background: rgba(124,106,247,.1); }
+  .check-item input[type=checkbox] {
+    accent-color: var(--accent);
+    width: 16px; height: 16px;
+  }
+
+  /* Form rows */
+  .form-row {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 12px;
+  }
+  .form-label {
+    width: 140px; flex-shrink: 0;
+    font-size: 13px; color: var(--muted);
+    text-align: right;
+  }
+  .form-input {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .form-input:focus { border-color: var(--accent); }
+
+  /* Log */
+  .log-box {
+    background: var(--log-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    height: 420px;
+    overflow-y: auto;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .log-box::-webkit-scrollbar { width:6px; }
+  .log-box::-webkit-scrollbar-track { background:transparent; }
+  .log-box::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+  .log-line-error   { color: var(--red); }
+  .log-line-warn    { color: var(--yellow); }
+  .log-line-success { color: var(--green); }
+  .log-line-muted   { color: var(--muted); }
+  .log-line-info    { color: var(--text); }
+
+  /* Status row */
+  .status-row {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 0;
+  }
+  .status-label { font-size:13px; color:var(--muted); }
+  .status-value { font-size:13px; font-weight:600; }
+
+  /* Toggle switch */
+  .toggle-wrap { display:flex; align-items:center; gap:10px; }
+  .toggle {
+    position:relative; width:44px; height:24px;
+    background: var(--border); border-radius:12px;
+    cursor:pointer; transition:background .2s;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle::after {
+    content:''; position:absolute; top:3px; left:3px;
+    width:18px; height:18px; border-radius:50%;
+    background:#fff; transition:transform .2s;
+  }
+  .toggle.on::after { transform:translateX(20px); }
+
+  /* Toast */
+  .toast {
+    position:fixed; bottom:24px; right:24px;
+    padding:12px 20px; border-radius:10px;
+    font-size:13px; font-weight:600;
+    z-index:999; opacity:0; transform:translateY(10px);
+    transition: all .3s;
+    pointer-events:none;
+  }
+  .toast.show { opacity:1; transform:translateY(0); }
+  .toast-success { background:var(--green); color:#1e1e2e; }
+  .toast-error   { background:var(--red); color:#1e1e2e; }
+  .toast-info    { background:var(--accent); color:#fff; }
+
+  /* Login overlay */
+  .login-overlay {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background: var(--bg);
+    display:flex; align-items:center; justify-content:center;
+    z-index: 9999;
+  }
+  .login-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 36px 32px;
+    width: 340px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  }
+  .login-box h2 { text-align:center; font-size:20px; margin-bottom:24px; }
+  .login-box h2 span { color:var(--accent); }
+  .login-field { margin-bottom:16px; }
+  .login-field label { display:block; font-size:13px; color:var(--muted); margin-bottom:5px; }
+  .login-field input {
+    width:100%; padding:9px 12px;
+    background:var(--bg); border:1px solid var(--border); border-radius:8px;
+    color:var(--text); font-size:14px; outline:none;
+  }
+  .login-field input:focus { border-color:var(--accent); }
+  .btn-login-full {
+    width:100%; padding:10px; margin-top:6px;
+    background:var(--accent); color:#fff; border:none; border-radius:8px;
+    font-size:14px; font-weight:600; cursor:pointer;
+  }
+  .btn-login-full:hover { background:var(--accent-dim); }
+  .login-err { color:var(--red); font-size:13px; text-align:center; margin-top:10px; min-height:18px; }
+
+  /* User menu */
+  .user-menu { display:flex; align-items:center; gap:10px; }
+  .user-name { font-size:13px; color:var(--muted); }
+  .btn-logout { padding:5px 14px; font-size:12px; border-radius:6px; background:var(--surface2); color:var(--text); border:1px solid var(--border); cursor:pointer; }
+  .btn-logout:hover { border-color:var(--red); color:var(--red); }
+
+  /* Change password modal */
+  .modal-overlay {
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,.6); z-index:10000;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .modal-box {
+    background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding:28px 28px; width:360px;
+  }
+  .modal-box h3 { font-size:16px; margin-bottom:18px; }
+  .modal-field { margin-bottom:14px; }
+  .modal-field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .modal-field input {
+    width:100%; padding:8px 12px;
+    background:var(--bg); border:1px solid var(--border); border-radius:8px;
+    color:var(--text); font-size:13px; outline:none;
+  }
+  .modal-field input:focus { border-color:var(--accent); }
+  .modal-actions { display:flex; gap:10px; margin-top:18px; }
+  .modal-err { color:var(--red); font-size:12px; margin-top:8px; min-height:16px; }
+
+  /* Responsive */
+  @media (max-width:640px) {
+    .form-row { flex-direction:column; align-items:flex-start; }
+    .form-label { width:auto; text-align:left; }
+    .task-grid { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
+  }
+</style>
+</head>
+<body>
+
+<!-- Login Overlay (shown when not logged in) -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-box">
+    <h2>⚙ <span>MAABot</span> 登录</h2>
+    <div class="login-field">
+      <label>账号</label>
+      <input id="loginUser" type="text" placeholder="请输入账号" autocomplete="username">
+    </div>
+    <div class="login-field">
+      <label>密码</label>
+      <input id="loginPass" type="password" placeholder="请输入密码" autocomplete="current-password">
+    </div>
+    <button class="btn-login-full" onclick="doLogin()">登  录</button>
+    <div class="login-err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- Header -->
+<div class="header">
+  <h1>⚙ <span>MAABot</span> 控制面板</h1>
+  <div class="user-menu">
+    <span class="badge badge-stopped" id="statusBadge">
+      <span class="badge-dot"></span>
+      <span id="statusText">未连接</span>
+    </span>
+    <span class="user-name" id="userName"></span>
+    <button class="btn-logout" onclick="showChangePw()">修改密码</button>
+    <button class="btn-logout" onclick="doLogout()">登出</button>
+  </div>
+</div>
+
+<!-- Nav -->
+<div class="nav">
+  <div class="nav-item active" data-page="control">控制</div>
+  <div class="nav-item" data-page="tasks">MAA 任务</div>
+  <div class="nav-item" data-page="config">配置</div>
+  <div class="nav-item" data-page="logs">运行日志</div>
+</div>
+
+<!-- ====== 控制页 ====== -->
+<div class="page active" id="page-control">
+  <div class="card">
+    <div class="card-title">服务控制</div>
+    <div class="card-body" style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-green" id="btnStart" onclick="startService()">▶ 启动服务</button>
+      <button class="btn btn-red" id="btnStop" onclick="stopService()" disabled>■ 停止服务</button>
+      <button class="btn btn-yellow" id="btnRestart" onclick="restartService()" disabled>↺ 重启服务</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">运行模式</div>
+    <div class="card-body">
+      <div class="toggle-wrap">
+        <div class="toggle on" id="qqbotToggle" onclick="toggleQQBot()"></div>
+        <span id="qqbotLabel" style="font-size:13px;">QQ Bot 已启用</span>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:8px;" id="qqbotHint">完整模式：QQ 推送 + MAA 监控 + HTTP 服务</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">MAA 状态</div>
+    <div class="card-body">
+      <div class="status-row">
+        <span class="status-label">MAA 进程：</span>
+        <span class="status-value" id="maaStatus" style="color:var(--muted)">检测中...</span>
+        <button class="btn btn-yellow btn-sm" id="btnRestartMaa" onclick="restartMaa()">重启 MAA</button>
+      </div>
+      <div class="status-row">
+        <span class="status-label">已连接设备：</span>
+        <span class="status-value" id="deviceCount">0</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">待执行任务：</span>
+        <span class="status-value" id="pendingCount">0</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== MAA 任务页 ====== -->
+<div class="page" id="page-tasks">
+  <div class="card">
+    <div class="card-title">快捷任务</div>
+    <div class="card-body">
+      <div class="task-grid">
+        <div class="task-btn" onclick="dispatchPreset('daily_rogue')">全选 + 肉鸽</div>
+        <div class="task-btn" onclick="dispatchPreset('daily')">全选（日常）</div>
+        <div class="task-btn" onclick="dispatchPreset('rogue')">肉鸽模式</div>
+        <div class="task-btn" onclick="dispatchPreset('infrast')">基建换班</div>
+        <div class="task-btn" onclick="dispatchPreset('recruit')">自动公招</div>
+        <div class="task-btn" onclick="dispatchPreset('fight')">理智作战</div>
+        <div class="task-btn" onclick="dispatchPreset('mall')">信用购物</div>
+        <div class="task-btn" onclick="dispatchPreset('award')">领取奖励</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">控制命令</div>
+    <div class="card-body" style="display:flex;gap:10px;">
+      <button class="btn btn-red" onclick="dispatchStop()">🛑 停止任务</button>
+      <button class="btn btn-muted" onclick="dispatchHeartbeat()">💓 心跳检测</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">自定义任务勾选</div>
+    <div class="card-body">
+      <div class="check-grid" id="customTasks"></div>
+      <div style="margin-top:14px;display:flex;gap:10px;">
+        <button class="btn btn-green" onclick="applyCustomTasks()">▶ 应用并下发</button>
+        <button class="btn btn-accent" onclick="writeCustomConfig()">写入配置文件</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== 配置页 ====== -->
+<div class="page" id="page-config">
+  <div class="card">
+    <div class="card-title">QQ Bot 配置</div>
+    <div class="card-body">
+      <div class="form-row">
+        <span class="form-label">管理员 QQ</span>
+        <input class="form-input" id="cfgAdminQQ" placeholder="">
+      </div>
+      <div class="form-row">
+        <span class="form-label">机器人 QQ</span>
+        <input class="form-input" id="cfgBotQQ" placeholder="">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">MAA 路径配置</div>
+    <div class="card-body">
+      <div class="form-row">
+        <span class="form-label">MAA 可执行文件</span>
+        <input class="form-input" id="cfgMaaExe" placeholder="D:\MAA\MAA.exe">
+      </div>
+      <div class="form-row">
+        <span class="form-label">MAA 日志路径</span>
+        <input class="form-input" id="cfgLogPath" placeholder="D:\MAA\debug\gui.log">
+      </div>
+      <div class="form-row">
+        <span class="form-label">MAA 配置文件</span>
+        <input class="form-input" id="cfgCfgPath" placeholder="D:\MAA\config\gui.new.json">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">HTTP 服务配置</div>
+    <div class="card-body">
+      <div class="form-row">
+        <span class="form-label">监听端口</span>
+        <input class="form-input" id="cfgPort" placeholder="2345" type="number">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">日志推送配置</div>
+    <div class="card-body">
+      <div class="form-row">
+        <span class="form-label">批次大小（条）</span>
+        <input class="form-input" id="cfgBatchSize" placeholder="5" type="number">
+      </div>
+      <div class="form-row">
+        <span class="form-label">批次超时（秒）</span>
+        <input class="form-input" id="cfgBatchTimeout" placeholder="10" type="number">
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:12px;margin-top:8px;">
+    <button class="btn btn-accent" onclick="saveConfig()">💾 保存配置</button>
+    <span style="font-size:12px;color:var(--muted);">保存后需重启服务生效</span>
+  </div>
+</div>
+
+<!-- ====== 日志页 ====== -->
+<div class="page" id="page-logs">
+  <div style="display:flex;gap:10px;margin-bottom:10px;align-items:center;">
+    <button class="btn btn-muted btn-sm" onclick="clearLog()">清空</button>
+    <button class="btn btn-muted btn-sm" onclick="copyLog()">复制全部</button>
+    <span style="font-size:12px;color:var(--muted);margin-left:auto;">SSE 实时输出</span>
+    <div class="toggle-wrap">
+      <div class="toggle on" id="logAutoToggle" onclick="toggleLogAuto()"></div>
+      <span style="font-size:12px;">自动滚动</span>
+    </div>
+  </div>
+  <div class="log-box" id="logBox"></div>
+</div>
+
+<!-- Change Password Modal -->
+<div class="modal-overlay" id="pwModal" style="display:none;">
+  <div class="modal-box">
+    <h3>修改密码</h3>
+    <div class="modal-field">
+      <label>旧密码</label>
+      <input id="pwOld" type="password" placeholder="请输入当前密码">
+    </div>
+    <div class="modal-field">
+      <label>新密码</label>
+      <input id="pwNew" type="password" placeholder="请输入新密码">
+    </div>
+    <div class="modal-field">
+      <label>确认新密码</label>
+      <input id="pwNew2" type="password" placeholder="再次输入新密码">
+    </div>
+    <div class="modal-err" id="pwErr"></div>
+    <div class="modal-actions">
+      <button class="btn btn-accent" onclick="submitChangePw()">确认修改</button>
+      <button class="btn btn-muted" onclick="hideChangePw()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ──────────────────────────────────────
+//  Auth
+// ──────────────────────────────────────
+let authUser = '';
+
+async function fetchAuth() {
+  try {
+    const r = await fetch('/api/auth/status');
+    const d = await r.json();
+    if (d.logged_in) {
+      authUser = d.user;
+      document.getElementById('loginOverlay').style.display = 'none';
+      document.getElementById('userName').textContent = d.user;
+      initApp();
+    } else {
+      document.getElementById('loginOverlay').style.display = 'flex';
+    }
+  } catch(e) {
+    document.getElementById('loginOverlay').style.display = 'flex';
+  }
+}
+
+async function doLogin() {
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  const err = document.getElementById('loginErr');
+  if (!u || !p) { err.textContent = '请输入账号和密码'; return; }
+  try {
+    const resp = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username:u, password:p}),
+    });
+    const d = await resp.json();
+    if (d.ok) {
+      authUser = u;
+      document.getElementById('loginOverlay').style.display = 'none';
+      document.getElementById('userName').textContent = u;
+      initApp();
+    } else {
+      err.textContent = d.error || '登录失败';
+    }
+  } catch(e) {
+    err.textContent = '网络错误';
+  }
+}
+
+async function doLogout() {
+  try { await fetch('/api/logout', {method:'POST'}); } catch(e) {}
+  location.reload();
+}
+
+function showChangePw() {
+  document.getElementById('pwModal').style.display = 'flex';
+  document.getElementById('pwOld').value = '';
+  document.getElementById('pwNew').value = '';
+  document.getElementById('pwNew2').value = '';
+  document.getElementById('pwErr').textContent = '';
+}
+function hideChangePw() { document.getElementById('pwModal').style.display = 'none'; }
+async function submitChangePw() {
+  const oldPw = document.getElementById('pwOld').value;
+  const newPw = document.getElementById('pwNew').value;
+  const newPw2 = document.getElementById('pwNew2').value;
+  const err = document.getElementById('pwErr');
+  if (!oldPw || !newPw) { err.textContent = '请填写完整'; return; }
+  if (newPw !== newPw2) { err.textContent = '两次新密码不一致'; return; }
+  if (newPw.length < 6) { err.textContent = '新密码至少6位'; return; }
+  try {
+    const r = await fetch('/api/auth/change-password', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({old_password:oldPw, new_password:newPw}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast('密码已修改，请重新登录', 'success');
+      hideChangePw();
+      setTimeout(doLogout, 1500);
+    } else {
+      err.textContent = d.error || '修改失败';
+    }
+  } catch(e) { err.textContent = '网络错误'; }
+}
+
+document.addEventListener('keydown', e => {
+  if (document.getElementById('loginOverlay').style.display !== 'none' && e.key === 'Enter') doLogin();
+});
+
+// ──────────────────────────────────────
+//  State
+// ──────────────────────────────────────
+let qqbotEnabled = true;
+let logAutoScroll = true;
+let eventSource = null;
+let appInited = false;
+
+const TASK_LIST = [
+  {id:'StartUpTask',     label:'开始唤醒'},
+  {id:'FightTask',       label:'理智作战'},
+  {id:'InfrastTask',     label:'基建换班'},
+  {id:'RecruitTask',     label:'自动公招'},
+  {id:'MallTask',        label:'信用收支'},
+  {id:'AwardTask',       label:'领取奖励'},
+  {id:'RoguelikeTask',   label:'自动肉鸽'},
+  {id:'ReclamationTask', label:'生息演算'},
+];
+
+const PRESETS = {
+  daily_rogue: ['StartUpTask','FightTask','InfrastTask','RecruitTask','MallTask','AwardTask','RoguelikeTask'],
+  daily:       ['StartUpTask','FightTask','InfrastTask','RecruitTask','MallTask','AwardTask'],
+  rogue:       ['StartUpTask','RoguelikeTask'],
+  infrast:     ['InfrastTask'],
+  recruit:     ['RecruitTask'],
+  fight:       ['FightTask'],
+  mall:        ['MallTask'],
+  award:       ['AwardTask'],
+};
+
+// ──────────────────────────────────────
+//  Init
+// ──────────────────────────────────────
+function initApp() {
+  if (appInited) return;
+  appInited = true;
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      item.classList.add('active');
+      document.getElementById('page-' + item.dataset.page).classList.add('active');
+    });
+  });
+  const grid = document.getElementById('customTasks');
+  const dailySet = new Set(PRESETS.daily);
+  TASK_LIST.forEach(t => {
+    const label = document.createElement('label');
+    label.className = 'check-item';
+    label.innerHTML = '<input type="checkbox" value="' + t.id + '" ' + (dailySet.has(t.id)?'checked':'') + '> ' + t.label;
+    grid.appendChild(label);
+  });
+  loadConfig();
+  connectSSE();
+  pollStatus();
+  setInterval(pollStatus, 3000);
+}
+
+document.addEventListener('DOMContentLoaded', () => { fetchAuth(); });
+
+// ──────────────────────────────────────
+//  API helpers (with 401 handling)
+// ──────────────────────────────────────
+async function apiPost(path, data) {
+  try {
+    const resp = await fetch(path, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data || {}),
+    });
+    if (resp.status === 401) { doLogout(); return {ok:false, error:'Not logged in'}; }
+    return await resp.json();
+  } catch(e) { return {ok:false, error: String(e)}; }
+}
+
+async function apiGet(path) {
+  try {
+    const resp = await fetch(path);
+    if (resp.status === 401) { doLogout(); return null; }
+    return await resp.json();
+  } catch(e) { return null; }
+}
+
+// ──────────────────────────────────────
+//  Toast
+// ──────────────────────────────────────
+function toast(msg, type) {
+  type = type || 'info';
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast toast-' + type + ' show';
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ──────────────────────────────────────
+//  Service control
+// ──────────────────────────────────────
+async function startService() {
+  const r = await apiPost('/api/service/start', {qqbot: qqbotEnabled});
+  if (r.ok) { toast('Service started', 'success'); refreshButtons(r.running); }
+  else toast(r.error || 'Failed', 'error');
+}
+async function stopService() {
+  const r = await apiPost('/api/service/stop');
+  if (r.ok) { toast('Service stopped', 'success'); refreshButtons(false); }
+  else toast(r.error || 'Failed', 'error');
+}
+async function restartService() {
+  const r = await apiPost('/api/service/restart', {qqbot: qqbotEnabled});
+  if (r.ok) { toast('Service restarted', 'success'); refreshButtons(r.running); }
+  else toast(r.error || 'Failed', 'error');
+}
+function refreshButtons(running) {
+  document.getElementById('btnStart').disabled = running;
+  document.getElementById('btnStop').disabled = !running;
+  document.getElementById('btnRestart').disabled = !running;
+  const badge = document.getElementById('statusBadge');
+  const text = document.getElementById('statusText');
+  if (running) { badge.className = 'badge badge-running'; text.textContent = 'Running'; }
+  else { badge.className = 'badge badge-stopped'; text.textContent = 'Stopped'; }
+}
+
+// ──────────────────────────────────────
+//  QQ Bot toggle
+// ──────────────────────────────────────
+function toggleQQBot() {
+  qqbotEnabled = !qqbotEnabled;
+  const el = document.getElementById('qqbotToggle');
+  const label = document.getElementById('qqbotLabel');
+  const hint = document.getElementById('qqbotHint');
+  if (qqbotEnabled) {
+    el.classList.add('on');
+    label.textContent = 'QQ Bot Enabled';
+    hint.textContent = 'Full mode: QQ push + MAA monitor + HTTP server';
+  } else {
+    el.classList.remove('on');
+    label.textContent = 'QQ Bot Disabled';
+    hint.textContent = 'Standalone: MAA monitor + HTTP only';
+  }
+}
+
+// ──────────────────────────────────────
+//  MAA operations
+// ──────────────────────────────────────
+async function restartMaa() {
+  toast('Restarting MAA...', 'info');
+  const r = await apiPost('/api/maa/restart');
+  if (r.ok) toast('MAA restarted', 'success');
+  else toast(r.error || 'Failed', 'error');
+}
+async function dispatchPreset(name) {
+  const tasks = PRESETS[name];
+  if (!tasks) return;
+  const r = await apiPost('/api/maa/dispatch', {tasks});
+  if (r.ok) toast('Task dispatched', 'success');
+  else toast(r.error || 'Failed', 'error');
+}
+async function dispatchStop() {
+  const r = await apiPost('/api/maa/dispatch', {stop: true});
+  if (r.ok) toast('Stop sent', 'success');
+  else toast(r.error || 'Failed', 'error');
+}
+async function dispatchHeartbeat() {
+  const r = await apiGet('/maa/status');
+  if (r) toast('Heartbeat OK', 'success');
+  else toast('Unreachable', 'error');
+}
+async function applyCustomTasks() {
+  const checks = document.querySelectorAll('#customTasks input[type=checkbox]');
+  const tasks = [];
+  checks.forEach(c => { if (c.checked) tasks.push(c.value); });
+  if (!tasks.length) { toast('Select at least one task', 'error'); return; }
+  const r = await apiPost('/api/maa/dispatch', {tasks});
+  if (r.ok) toast('Custom tasks dispatched', 'success');
+  else toast(r.error || 'Failed', 'error');
+}
+async function writeCustomConfig() {
+  const checks = document.querySelectorAll('#customTasks input[type=checkbox]');
+  const tasks = [];
+  checks.forEach(c => { if (c.checked) tasks.push(c.value); });
+  if (!tasks.length) { toast('Select at least one task', 'error'); return; }
+  const r = await apiPost('/api/maa/write-config', {tasks});
+  if (r.ok) toast('Config written to gui.new.json', 'success');
+  else toast(r.error || 'Failed', 'error');
+}
+
+// ──────────────────────────────────────
+//  Config
+// ──────────────────────────────────────
+async function loadConfig() {
+  const r = await apiGet('/api/config');
+  if (!r) return;
+  document.getElementById('cfgAdminQQ').value = r.root || '';
+  document.getElementById('cfgBotQQ').value = r.bt_uin || '';
+  document.getElementById('cfgMaaExe').value = r.maa_exe || '';
+  document.getElementById('cfgLogPath').value = r.maa_log_path || '';
+  document.getElementById('cfgCfgPath').value = r.maa_config_path || '';
+  document.getElementById('cfgPort').value = r.http_port || 2345;
+  document.getElementById('cfgBatchSize').value = r.log_batch_size || 5;
+  document.getElementById('cfgBatchTimeout').value = r.log_batch_timeout || 10;
+  if (r.qqbot_enabled === false) {
+    qqbotEnabled = false;
+    document.getElementById('qqbotToggle').classList.remove('on');
+    document.getElementById('qqbotLabel').textContent = 'QQ Bot Disabled';
+    document.getElementById('qqbotHint').textContent = 'Standalone: MAA monitor + HTTP only';
+  }
+}
+async function saveConfig() {
+  const data = {
+    root: document.getElementById('cfgAdminQQ').value.trim(),
+    bt_uin: document.getElementById('cfgBotQQ').value.trim(),
+    maa_exe: document.getElementById('cfgMaaExe').value.trim(),
+    maa_log_path: document.getElementById('cfgLogPath').value.trim(),
+    maa_config_path: document.getElementById('cfgCfgPath').value.trim(),
+    http_port: parseInt(document.getElementById('cfgPort').value) || 2345,
+    log_batch_size: parseInt(document.getElementById('cfgBatchSize').value) || 5,
+    log_batch_timeout: parseInt(document.getElementById('cfgBatchTimeout').value) || 10,
+    qqbot_enabled: qqbotEnabled,
+  };
+  const r = await apiPost('/api/config', data);
+  if (r.ok) toast('Config saved, restart to apply', 'success');
+  else toast(r.error || 'Save failed', 'error');
+}
+
+// ──────────────────────────────────────
+//  Status polling
+// ──────────────────────────────────────
+async function pollStatus() {
+  const r = await apiGet('/api/status');
+  if (!r) {
+    document.getElementById('maaStatus').textContent = 'Unreachable';
+    document.getElementById('maaStatus').style.color = 'var(--red)';
+    return;
+  }
+  refreshButtons(r.service_running);
+  const maaEl = document.getElementById('maaStatus');
+  if (r.maa_running) {
+    maaEl.textContent = 'Running';
+    maaEl.style.color = 'var(--green)';
+  } else {
+    maaEl.textContent = 'Not running';
+    maaEl.style.color = 'var(--red)';
+  }
+  document.getElementById('deviceCount').textContent = r.device_count || 0;
+  document.getElementById('pendingCount').textContent = r.pending_count || 0;
+}
+
+// ──────────────────────────────────────
+//  Log SSE
+// ──────────────────────────────────────
+async function loadLogHistory() {
+  try {
+    const r = await apiGet('/api/logs/history');
+    if (r && r.lines) {
+      const box = document.getElementById('logBox');
+      box.innerHTML = '';
+      r.lines.forEach(line => appendLogRaw(line, false));
+      if (logAutoScroll) box.scrollTop = box.scrollHeight;
+    }
+  } catch(e) { console.error('Failed to load log history:', e); }
+}
+
+function connectSSE() {
+  if (eventSource) eventSource.close();
+  loadLogHistory().then(() => {
+    eventSource = new EventSource('/api/logs/stream');
+    eventSource.onmessage = (e) => { appendLogRaw(e.data, true); };
+    eventSource.onerror = () => { setTimeout(connectSSE, 3000); };
+  });
+}
+
+function appendLogRaw(line, autoScrollCheck) {
+  const box = document.getElementById('logBox');
+  const div = document.createElement('div');
+  let cls = 'log-line-info';
+  const low = line.toLowerCase();
+  if (low.includes('[error]') || low.includes('error') || low.includes('失败') || low.includes('错误'))
+    cls = 'log-line-error';
+  else if (low.includes('[warn]') || low.includes('warn') || low.includes('警告'))
+    cls = 'log-line-warn';
+  else if (low.includes('✅') || low.includes('成功') || low.includes('就绪'))
+    cls = 'log-line-success';
+  else if (low.includes('[debug]') || low.includes('detail'))
+    cls = 'log-line-muted';
+  div.className = cls;
+  div.textContent = line;
+  box.appendChild(div);
+  while (box.children.length > 5000) box.removeChild(box.firstChild);
+  if (autoScrollCheck && logAutoScroll) box.scrollTop = box.scrollHeight;
+}
+
+function clearLog() { document.getElementById('logBox').innerHTML = ''; }
+function copyLog() {
+  const box = document.getElementById('logBox');
+  const text = Array.from(box.children).map(c => c.textContent).join('\n');
+  navigator.clipboard.writeText(text).then(() => toast('Copied', 'success'));
+}
+function toggleLogAuto() {
+  logAutoScroll = !logAutoScroll;
+  document.getElementById('logAutoToggle').classList.toggle('on', logAutoScroll);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+logs/
+napcat/
+data/
+plugins/
+.workbuddy/
+config.yaml
+Caddyfile
+Caddyfile.*

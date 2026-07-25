@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+logs/
+napcat/
+data/
+plugins/
+.workbuddy/
+config.yaml
+Caddyfile
+Caddyfile.*
+build/
+dist/
+release/
+*.egg-info/
+*.stackdump
+临时调试文件/
