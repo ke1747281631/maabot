@@ -171,7 +171,7 @@ log_batch_timeout: 10       # 最多等待多少秒后强制发送
 ### 启动顺序
 
 ```
-1. 以管理员权限启动 napcat（napcat/launcher.bat）
+1. 打开 NapCatQQ-Desktop，登录机器人 QQ 号并启动 Bot
 2. 启动 maabot（GUI 或命令行）
 3. 启动 MAA（可由 maabot 自动拉起，或手动启动）
 ```
@@ -362,22 +362,22 @@ maabot 提供以下 HTTP 端点：
 
 ### Q: 启动时提示 "napcat HTTP API（端口 3000）未启动"
 
-napcat 没有以管理员权限运行，或 onebot11 配置中 HTTP Server 未启用。请：
+NapCatQQ-Desktop 未启动或 HTTP 服务未启用。请：
 
-1. 以管理员权限运行 `napcat/launcher.bat`
-2. 检查 `onebot11_<QQ号>.json` 中 `httpServers` 的 `enable` 是否为 `true`
+1. 打开 NapCatQQ-Desktop，确认已登录机器人 QQ 号
+2. 在网络配置中启用 HTTP 服务器（端口 3000）
 3. 确认端口 3000 正在监听：`netstat -ano | findstr 3000`
 
 ### Q: QQ 收不到通知消息
 
-检查 `config.yaml` 中 `napcat_http_api_token` 是否与 `onebot11_<QQ号>.json` 中 HTTP Server 的 `token` 一致。
+检查 `config.yaml` 中 `napcat_http_api_token` 是否与 NapCatQQ-Desktop 网络配置中 HTTP Server 的 Token 一致。
 
 ### Q: QQ 发指令没反应
 
-检查 napcat 的 HTTP Client（Webhook）配置：
+检查 NapCatQQ-Desktop 网络配置中的 HTTP 客户端（Webhook）设置：
 
-- `url` 应为 `http://127.0.0.1:2345/napcat/event`
-- `enable` 应为 `true`
+- URL 应为 `http://127.0.0.1:2345/napcat/event`
+- 确保已启用
 
 ### Q: MAA 远程控制连不上
 
