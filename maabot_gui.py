@@ -110,6 +110,11 @@ class MaaBotGUI(tk.Tk):
         self._log_queue: queue.Queue = queue.Queue()
         self._running = True
 
+        # 管理员权限检测：MAA 以管理员运行时，非管理员权限无法杀掉它（taskkill 失败）
+        self._is_admin = self._check_admin()
+        if not self._is_admin:
+            print("[GUI] ⚠️ 当前不是管理员权限：若 MAA 以管理员权限运行，自动重启 MAA 将失败")
+
         # 记录所有由 GUI 启动的子进程 PID，用于关闭时清理残留
         self._child_pids: set[int] = set()
         self._service_pid: int | None = None  # 当前服务进程 PID
@@ -194,20 +199,35 @@ class MaaBotGUI(tk.Tk):
         self._btn_stop.pack(side=tk.LEFT, padx=(0, 8))
         self._btn_restart.pack(side=tk.LEFT)
 
-        # 运行模式（napcat HTTP）
+        # 运行模式
         mode_card = self._card(f, "运行模式")
         mode_card.pack(fill=tk.X, padx=16, pady=6)
 
         mode_inner = tk.Frame(mode_card, bg=CLR_SURFACE)
         mode_inner.pack(fill=tk.X, padx=10, pady=10)
 
+        self._qqbot_var = tk.BooleanVar(value=True)
+        cb_qq = tk.Checkbutton(
+            mode_inner,
+            text="启用 QQ 推送（napcat HTTP 模式）",
+            variable=self._qqbot_var,
+            bg=CLR_SURFACE, fg=CLR_TEXT,
+            selectcolor=CLR_BG,
+            activebackground=CLR_SURFACE,
+            activeforeground=CLR_TEXT,
+            font=("微软雅黑", 10),
+            command=self._on_mode_change,
+        )
+        cb_qq.pack(side=tk.LEFT)
+
         self._mode_hint = tk.Label(
             mode_inner,
-            text="napcat HTTP 模式：QQ 推送 + MAA 监控 + HTTP 服务",
-            bg=CLR_SURFACE, fg=CLR_GREEN,
+            text="",
+            bg=CLR_SURFACE, fg=CLR_MUTED,
             font=("微软雅黑", 9),
         )
-        self._mode_hint.pack(side=tk.LEFT)
+        self._mode_hint.pack(side=tk.LEFT, padx=12)
+        self._on_mode_change()
 
         # MAA 状态区
         maa_card = self._card(f, "MAA 状态")
@@ -538,22 +558,29 @@ class MaaBotGUI(tk.Tk):
             self._log(f"[GUI] ⚠️ 端口 {port} 仍被占用，强制释放...\n", "warn")
             self._force_free_port(port)
 
-        # 检测 napcat HTTP API 是否就绪（端口 3000 由 QQ.exe 监听）
-        if not self._is_port_listening(3000):
-            ret = messagebox.askyesno(
-                "napcat 未就绪",
-                "检测到 napcat HTTP API（端口 3000）未启动！\n\n"
-                "QQ 推送需要 napcat 桌面版先运行并登录。\n"
-                "请先启动 NapCatQQ-Desktop，登录机器人 QQ 号。\n\n"
-                "是否仍要启动（无 QQ 推送，仅 MAA 监控 + HTTP 服务）？\n"
-                "（点击「否」取消启动）",
-            )
-            if not ret:
-                self._log("[GUI] 用户取消启动（napcat 未就绪）\n", "warn")
-                return
+        # QQ Bot 模式：检测 napcat HTTP API 是否就绪（端口 3000 由 QQ.exe 监听）
+        if self._qqbot_var.get():
+            if not self._is_port_listening(3000):
+                ret = messagebox.askyesno(
+                    "napcat 未就绪",
+                    "检测到 napcat HTTP API（端口 3000）未启动！\n\n"
+                    "QQ 推送需要 napcat 桌面版先运行并登录。\n"
+                    "请先启动 NapCatQQ-Desktop，登录机器人 QQ 号。\n\n"
+                    "是否以独立模式启动（无 QQ 推送，仅 MAA 监控 + HTTP 服务）？\n"
+                    "（点击「否」取消启动）",
+                )
+                if ret:
+                    self._qqbot_var.set(False)
+                    self._on_mode_change()
+                    self._log("[GUI] napcat 未就绪，已临时降级为独立模式\n", "warn")
+                else:
+                    self._log("[GUI] 用户取消启动（napcat 未就绪）\n", "warn")
+                    return
 
         # 生成启动参数
         args = [sys.executable, MAABOT_SCRIPT]
+        if not self._qqbot_var.get():
+            args.append("--no-qqbot")
 
         self._log(f"[GUI] 正在启动服务: {' '.join(args)}\n", "muted")
 
@@ -746,6 +773,14 @@ class MaaBotGUI(tk.Tk):
             self._log(f"[GUI] 已终止残留进程 PID={pid}\n", "warn")
         except Exception as e:
             self._log(f"[GUI] 终止进程 PID={pid} 失败: {e}\n", "error")
+
+    def _check_admin(self) -> bool:
+        """检测当前进程是否以管理员权限运行"""
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
 
     def _is_port_listening(self, port: int) -> bool:
         """检测指定端口是否在监听（TCP 连接测试）"""
@@ -1141,6 +1176,23 @@ class MaaBotGUI(tk.Tk):
         # 更新 WebUI 地址标签
         self._refresh_webui_labels()
         messagebox.showinfo("保存成功", "配置已保存！\n重启服务后生效。")
+
+    # ─────────────────────────────────────────────
+    #  模式切换
+    # ─────────────────────────────────────────────
+    def _on_mode_change(self):
+        # 非管理员权限时提示（MAA 若以管理员运行则无法自动重启）
+        admin_warn = "" if self._is_admin else "  ⚠️ 非管理员权限，MAA 自动重启可能失败"
+        if self._qqbot_var.get():
+            self._mode_hint.config(
+                text="QQ 推送 + MAA 监控 + HTTP 服务" + admin_warn,
+                fg=CLR_GREEN if self._is_admin else CLR_YELLOW,
+            )
+        else:
+            self._mode_hint.config(
+                text="仅 MAA 监控 + HTTP 服务（无 QQ 推送）" + admin_warn,
+                fg=CLR_YELLOW,
+            )
 
     # ─────────────────────────────────────────────
     #  日志系统

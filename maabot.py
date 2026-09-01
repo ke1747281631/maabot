@@ -99,7 +99,10 @@ logger = logging.getLogger(__name__)
 #  命令行参数解析
 # ═══════════════════════════════════════════════
 _parser = argparse.ArgumentParser(description="MAABot 服务")
+_parser.add_argument("--no-qqbot", action="store_true",
+                     help="禁用 QQ 推送（独立模式：仅 MAA 监控 + HTTP 服务）")
 _args, _ = _parser.parse_known_args()
+QQBOT_ENABLED = not _args.no_qqbot
 
 # ═══════════════════════════════════════════════
 #  从 config.yaml 读取 QQ 号
@@ -466,8 +469,53 @@ def _restore_maa_proxy(backup: dict | None):
         logger.error(f"[PROXY] 恢复代理失败: {e}")
 
 
-def restart_maa() -> bool:
-    """关闭并重启 MAA，等待它连接到我们的端点。"""
+def _kill_maa_processes() -> bool:
+    """彻底结束 MAA.exe 进程树，返回是否成功。
+
+    仅返回 True 表示命令已发出（进程是否真正退出由调用方轮询 _is_maa_running 确认）。
+    taskkill 返回 1 通常是权限不足（MAA 以管理员权限运行，而本程序未提权），
+    此时会尝试 PowerShell Stop-Process 兜底，并给出明确提示。
+    """
+    # 方式1: taskkill 强制结束进程树（/t 连带子进程）
+    try:
+        ret = subprocess.run(
+            ["taskkill", "/f", "/t", "/im", "MAA.exe"],
+            capture_output=True, text=True, timeout=15,
+        )
+        logger.debug(f"[MAA] taskkill 返回: {ret.returncode} | {(ret.stdout or ret.stderr).strip()[:120]}")
+        if ret.returncode == 0:
+            logger.info("[MAA] taskkill 已执行（进程树）")
+            return True
+        logger.warning(f"[MAA] taskkill 失败(返回 {ret.returncode}): {(ret.stderr or ret.stdout).strip()[:150]}")
+    except Exception as e:
+        logger.warning(f"[MAA] taskkill 执行异常: {e}")
+
+    # 方式2: PowerShell Stop-Process 兜底（错误信息更明确，可区分权限不足）
+    try:
+        ps_script = "Stop-Process -Name MAA -Force -ErrorAction Stop"
+        ps = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if ps.returncode == 0:
+            logger.info("[MAA] PowerShell Stop-Process 成功")
+            return True
+        perr = (ps.stderr or ps.stdout).strip()
+        logger.warning(f"[MAA] Stop-Process 失败(返回 {ps.returncode}): {perr[:200]}")
+        if "denied" in perr.lower() or "拒绝" in perr:
+            logger.error("[MAA] ⚠️ 权限不足：MAA 可能以管理员权限运行，而本程序未以管理员权限运行！")
+            logger.error("[MAA] 请以管理员权限启动 GUI 或 maabot.py，否则无法重启 MAA")
+    except Exception as e:
+        logger.warning(f"[MAA] Stop-Process 执行异常: {e}")
+    return False
+
+
+def restart_maa(tasks: list[str] | None = None) -> bool:
+    """关闭并重启 MAA，等待它连接到我们的端点。
+
+    tasks 参数：若指定，会在旧进程确认退出后（启动新进程前）写入任务配置，
+    避免被 MAA 运行中的配置写回覆盖。
+    """
     global _proxy_backup
     maa_exe = CONFIG["maa_exe"]
 
@@ -489,15 +537,17 @@ def restart_maa() -> bool:
         was_running = _is_maa_running()
         logger.info(f"[MAA] MAA 进程状态: {'运行中' if was_running else '未运行'}")
 
-        # 关闭 MAA
+        # 关闭 MAA（多种方式彻底杀死，防止"假重启"：旧实例未被杀掉时
+        # 新进程会检测到已有实例并激活旧窗口退出，旧实例仍按旧配置执行）
+        old_pid = _get_maa_pid() if was_running else None
         if was_running:
             logger.info("[MAA] 正在关闭 MAA...")
-            try:
-                ret = subprocess.run(["taskkill", "/f", "/im", "MAA.exe"],
-                                   capture_output=True, timeout=10)
-                logger.debug(f"[MAA] taskkill 返回: {ret.returncode}")
-            except Exception as e:
-                logger.warning(f"[MAA] taskkill 执行失败: {e}\n{traceback.format_exc()}")
+            killed = _kill_maa_processes()
+            if not killed:
+                logger.error("[MAA] ========== 无法终止 MAA 进程，中止重启 ==========")
+                logger.error("[MAA] 请以管理员权限运行本程序（GUI 或 maabot.py）后重试")
+                _restore_maa_proxy(_proxy_backup)
+                return False
 
         # 等待 MAA 进程真正退出（最多 15 秒）
         logger.info("[MAA] 等待进程退出...")
@@ -510,7 +560,10 @@ def restart_maa() -> bool:
                 break
 
         if not process_exited:
-            logger.warning("[MAA] 进程未完全退出，继续尝试启动")
+            logger.error("[MAA] ========== 进程未完全退出（15秒超时），中止重启 ==========")
+            logger.error("[MAA] 请手动关闭 MAA 或以管理员权限运行本程序后重试")
+            _restore_maa_proxy(_proxy_backup)
+            return False
 
         # 额外等待 2 秒，确保 MAA 文件锁和资源完全释放
         time.sleep(2)
@@ -524,6 +577,12 @@ def restart_maa() -> bool:
         # MAA 的 VersionUpdate.Proxy 会作为全局 HttpClient 代理，导致
         # 对 127.0.0.1:2345 的远程控制请求也走代理，代理无法访问本机。
         _proxy_backup = _clear_maa_proxy()
+
+        # ★ 旧进程已确认退出，此刻写入任务配置最安全
+        # （MAA 已死，不会再有运行中的配置写回覆盖；新进程启动时读到最新勾选）
+        if tasks is not None:
+            logger.info(f"[MAA] 写入任务配置: {tasks}")
+            set_maa_task_checks(tasks)
 
         # 使用 os.startfile 启动 MAA（最简单可靠）
         logger.info(f"[MAA] 启动 MAA: {maa_exe}")
@@ -554,6 +613,12 @@ def restart_maa() -> bool:
 
         if not process_appeared:
             logger.error("[MAA] ========== MAA 进程未出现（15秒超时）==========")
+            _restore_maa_proxy(_proxy_backup)
+            return False
+
+        # 校验 PID：若 PID 与重启前相同，说明旧实例未死透（或新进程复用了实例），视为重启失败
+        if old_pid is not None and maa_pid == old_pid:
+            logger.error(f"[MAA] ========== MAA PID 未变化（{old_pid}），疑似旧实例仍在运行，重启失败 ==========")
             _restore_maa_proxy(_proxy_backup)
             return False
 
@@ -653,7 +718,7 @@ def apply_tasks_and_restart(tasks: list[str]) -> bool:
             dispatch_task("StopTask")
         time.sleep(2)  # 等待任务停止
 
-    ok = restart_maa()
+    ok = restart_maa(tasks)
     if not ok:
         send_private_msg("❌ MAA 启动超时，请检查 MAA 状态")
     logger.info(f"[MAA] apply_tasks_and_restart 返回: {ok}")
@@ -776,6 +841,10 @@ def _get_napcat_http_api() -> NapCatHTTPAPI | None:
 #  发私聊消息（通过 napcat HTTP API）
 # ═══════════════════════════════════════════════
 def send_private_msg(text: str):
+    if not QQBOT_ENABLED:
+        print(f"[NOTIFY] {text[:80]}")
+        return
+
     http_api = _get_napcat_http_api()
     if http_api:
         ok = http_api.send_private_msg(int(CONFIG["admin_qq"]), text)
@@ -995,17 +1064,16 @@ def watch_log_file():
                     logger.info("[LOG] [_auto_switch] 线程启动")
                     try:
                         _set_mode("全选")
-                        logger.info("[LOG] [_auto_switch] 状态已设置，写入配置")
-                        set_maa_task_checks(DAILY_TASKS)
+                        logger.info("[LOG] [_auto_switch] 状态已设置")
                         _last_task_set = set(DAILY_TASKS)
                         _last_auto_restart_time = time.time()
                         send_private_msg("🔄 已自动从「全选+肉鸽」切换为「全选」任务，正在重启 MAA...")
-                        # 使用 restart_maa()（os.startfile 可靠启动），不再依赖 restart_maa.py 脚本
-                        if restart_maa():
+                        # restart_maa(tasks)：先确认旧进程退出，再写入任务配置，再启动
+                        if restart_maa(DAILY_TASKS):
                             dispatch_task("LinkStart")
                             send_private_msg("✅ MAA 已重连，全选任务已下发")
                         else:
-                            send_private_msg("⚠️ MAA 重启超时（90s），请手动检查")
+                            send_private_msg("⚠️ MAA 重启失败（可能权限不足），请手动检查")
                             # ★ 通知 GUI 进行自动恢复（停服务 → 启 MAA → 启服务）
                             logger.error("[MAA] ⚠️ MAA 重启失败（常乐切换），请求 GUI 恢复")
                     except Exception as e:
@@ -1055,17 +1123,16 @@ def watch_log_file():
                     logger.info("[LOG] [_auto_switch_on_complete] 线程启动")
                     try:
                         _set_mode("全选")
-                        logger.info("[LOG] [_auto_switch_on_complete] 状态已设置，写入配置")
-                        set_maa_task_checks(DAILY_TASKS)
+                        logger.info("[LOG] [_auto_switch_on_complete] 状态已设置")
                         _last_task_set = set(DAILY_TASKS)
                         _last_auto_restart_time = time.time()
                         send_private_msg("🔄 肉鸽任务已完成，已自动切换为「全选」任务，正在重启 MAA...")
-                        # 使用 restart_maa()（os.startfile 可靠启动），不再依赖 restart_maa.py 脚本
-                        if restart_maa():
+                        # restart_maa(tasks)：先确认旧进程退出，再写入任务配置，再启动
+                        if restart_maa(DAILY_TASKS):
                             dispatch_task("LinkStart")
                             send_private_msg("✅ MAA 已重连，全选任务已下发")
                         else:
-                            send_private_msg("⚠️ MAA 重启超时（90s），请手动检查")
+                            send_private_msg("⚠️ MAA 重启失败（可能权限不足），请手动检查")
                             # ★ 通知 GUI 进行自动恢复（停服务 → 启 MAA → 启服务）
                             logger.error("[MAA] ⚠️ MAA 重启失败（肉鸽完成切换），请求 GUI 恢复")
                     except Exception as e:
@@ -1517,7 +1584,8 @@ def api_status():
         "device_count": len(devices),
         "pending_count": len(pending_tasks),
         "napcat_http": True,
-        "mode": "napcat-http",
+        "qqbot_enabled": QQBOT_ENABLED,
+        "mode": "qqbot" if QQBOT_ENABLED else "standalone",
     })
 
 
@@ -1766,6 +1834,10 @@ def napcat_event():
     if not data:
         return jsonify({"status": "error", "message": "invalid json"}), 400
 
+    # 独立模式：忽略所有消息事件
+    if not QQBOT_ENABLED:
+        return jsonify({"status": "ok"})
+
     post_type = data.get("post_type")
     if post_type == "message":
         message_type = data.get("message_type")
@@ -1787,7 +1859,8 @@ def napcat_event():
 # ═══════════════════════════════════════════════
 if __name__ == "__main__":
     print("=" * 50)
-    print(f"[INFO] 运行模式: napcat HTTP 模式")
+    mode_str = "QQ Bot + MAA 监控" if QQBOT_ENABLED else "独立模式（仅 MAA 监控，无 QQ 推送）"
+    print(f"[INFO] 运行模式: {mode_str}")
     print(f"[INFO] 机器人 QQ: {CONFIG['bot_qq']}")
     print(f"[INFO] 管理员 QQ: {CONFIG['admin_qq']}")
     print(f"[INFO] 监控日志: {CONFIG['log_path']}")

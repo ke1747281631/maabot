@@ -53,28 +53,58 @@ def load_maa_path() -> str:
     return maa_exe
 
 
-def kill_maa():
-    """杀掉所有 MAA.exe 进程"""
+def kill_maa() -> bool:
+    """杀掉所有 MAA.exe 进程。
+
+    返回 True = 已无 MAA 进程（成功或本来就没在运行）；
+    返回 False = 杀不掉（通常是权限不足：MAA 以管理员运行而本程序未提权）。
+    """
     _log("[MAA] 正在关闭旧 MAA 进程...")
+    if not _is_maa_running():
+        _log("[MAA] 没有运行中的 MAA 进程")
+        return True
+
+    # 方式1: taskkill 强制结束进程树
     try:
         ret = subprocess.run(
-            ["taskkill", "/f", "/im", "MAA.exe"],
-            capture_output=True, text=True, timeout=10,
+            ["taskkill", "/f", "/t", "/im", "MAA.exe"],
+            capture_output=True, text=True, timeout=15,
         )
         if ret.returncode == 0:
-            _log("[MAA] 已发送终止信号")
-        elif "没有找到" in ret.stderr or "not found" in ret.stderr.lower():
-            _log("[MAA] 没有运行中的 MAA 进程")
+            _log("[MAA] 已发送终止信号（进程树）")
+        else:
+            _log(f"[WARN] taskkill 失败(返回 {ret.returncode}): {(ret.stderr or ret.stdout).strip()[:150]}")
+            # 方式2: PowerShell Stop-Process 兜底
+            try:
+                ps_script = "Stop-Process -Name MAA -Force -ErrorAction Stop"
+                ps = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if ps.returncode == 0:
+                    _log("[MAA] PowerShell Stop-Process 成功")
+                else:
+                    perr = (ps.stderr or ps.stdout).strip()
+                    _log(f"[ERROR] Stop-Process 失败: {perr[:150]}")
+                    if "denied" in perr.lower() or "拒绝" in perr:
+                        _log("[ERROR] ⚠️ 权限不足：MAA 可能以管理员权限运行，请以管理员权限运行 GUI/maabot")
+                    return False
+            except Exception as e:
+                _log(f"[WARN] Stop-Process 执行异常: {e}")
+                return False
     except Exception as e:
-        _log(f"[WARN] taskkill 失败: {e}")
+        _log(f"[WARN] taskkill 执行异常: {e}")
+        return False
 
     # 等待进程真正退出（最多 10 秒）
     for i in range(10):
         time.sleep(1)
         if not _is_maa_running():
             _log(f"[MAA] 旧进程已退出（等待 {i+1}s）")
-            return
-    _log("[WARN] MAA 进程未完全退出，继续启动")
+            return True
+    _log("[ERROR] MAA 进程未完全退出（10秒超时），中止启动")
+    _log("[ERROR] 请手动关闭 MAA 或以管理员权限运行本程序后重试")
+    return False
 
 
 def _is_maa_running() -> bool:
@@ -195,7 +225,11 @@ def run_restart() -> bool:
     maa_exe = load_maa_path()
     _log(f"[MAA] 路径: {maa_exe}")
 
-    kill_maa()
+    # 杀掉旧进程；杀不掉（权限不足）则中止，避免"假重启"
+    if not kill_maa():
+        _log("[ERROR] MAA 重启中止（无法终止旧进程）")
+        _log("=" * 40)
+        return False
 
     # 额外等待 2 秒确保资源完全释放
     time.sleep(2)
